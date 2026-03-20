@@ -24,7 +24,7 @@
 (namespace_definition
   name: (_)) @signature
 
-; Typedef struct
+; Typedef struct with fields
 (type_definition
   type: (struct_specifier
     body: (field_declaration_list) @body)
@@ -33,5 +33,5 @@
 ; Typedef
 (type_definition) @signature
 
-; Template declaration (wraps function/class)
+; Template declaration
 (template_declaration) @signature
