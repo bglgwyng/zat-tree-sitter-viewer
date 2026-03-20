@@ -1,6 +1,13 @@
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor};
+
+#[derive(serde::Deserialize)]
+struct LangConfig {
+    label_kinds: Vec<String>,
+    uses_braces: bool,
+}
 
 fn main() {
     let lang_arg = std::env::args().nth(1).unwrap_or_else(|| {
@@ -8,25 +15,27 @@ fn main() {
         std::process::exit(1);
     });
 
-    let (language, query_src) = match lang_arg.as_str() {
-        "go" => (tree_sitter_go::LANGUAGE.into(), include_str!("../queries/go.scm")),
-        "c" => (tree_sitter_c::LANGUAGE.into(), include_str!("../queries/c.scm")),
-        "cpp" | "cc" | "cxx" => (tree_sitter_cpp::LANGUAGE.into(), include_str!("../queries/cpp.scm")),
-        "js" | "jsx" => (tree_sitter_javascript::LANGUAGE.into(), include_str!("../queries/javascript.scm")),
-        "ts" | "tsx" => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), include_str!("../queries/typescript.scm")),
-        "python" | "py" => (tree_sitter_python::LANGUAGE.into(), include_str!("../queries/python.scm")),
-        "rust" | "rs" => (tree_sitter_rust::LANGUAGE.into(), include_str!("../queries/rust.scm")),
-        "java" => (tree_sitter_java::LANGUAGE.into(), include_str!("../queries/java.scm")),
+    let (language, query_src, config_src) = match lang_arg.as_str() {
+        "go" => (tree_sitter_go::LANGUAGE.into(), include_str!("../queries/go.scm"), include_str!("../queries/go.json")),
+        "c" => (tree_sitter_c::LANGUAGE.into(), include_str!("../queries/c.scm"), include_str!("../queries/c.json")),
+        "cpp" | "cc" | "cxx" => (tree_sitter_cpp::LANGUAGE.into(), include_str!("../queries/cpp.scm"), include_str!("../queries/cpp.json")),
+        "js" | "jsx" => (tree_sitter_javascript::LANGUAGE.into(), include_str!("../queries/javascript.scm"), include_str!("../queries/javascript.json")),
+        "ts" | "tsx" => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), include_str!("../queries/typescript.scm"), include_str!("../queries/typescript.json")),
+        "python" | "py" => (tree_sitter_python::LANGUAGE.into(), include_str!("../queries/python.scm"), include_str!("../queries/python.json")),
+        "rust" | "rs" => (tree_sitter_rust::LANGUAGE.into(), include_str!("../queries/rust.scm"), include_str!("../queries/rust.json")),
+        "java" => (tree_sitter_java::LANGUAGE.into(), include_str!("../queries/java.scm"), include_str!("../queries/java.json")),
         other => {
             eprintln!("Unsupported language: {}", other);
             std::process::exit(1);
         }
     };
 
+    let config: LangConfig = serde_json::from_str(config_src).expect("Failed to parse lang config");
+
     let mut source = String::new();
     std::io::stdin().read_to_string(&mut source).expect("Failed to read stdin");
 
-    let entries = extract_outline(&source, language, query_src);
+    let entries = extract_outline(&source, language, query_src, &config);
     for entry in &entries {
         if entry.start_line > 0 {
             if entry.end_line > entry.start_line {
@@ -61,14 +70,13 @@ struct Member {
     end_line: usize,
 }
 
-fn format_member(source: &str, node: &Node) -> Member {
+fn format_member(source: &str, node: &Node, label_kinds: &HashSet<&str>) -> Member {
     let text = &source[node.byte_range()];
     let first_line = text.lines().next().unwrap_or(text).trim();
-
     let start_line = node.start_position().row + 1;
     let end_line = node.end_position().row + 1;
 
-    if node.kind() == "access_specifier" {
+    if label_kinds.contains(node.kind()) {
         return Member {
             text: format!("{}:", first_line),
             no_indent: true,
@@ -90,16 +98,18 @@ fn format_member(source: &str, node: &Node) -> Member {
     }
 }
 
-fn collect_body_members(source: &str, body_node: &Node) -> Vec<Member> {
+fn collect_body_members(source: &str, body_node: &Node, label_kinds: &HashSet<&str>) -> Vec<Member> {
     let mut members = Vec::new();
     let mut cursor = body_node.walk();
     for child in body_node.named_children(&mut cursor) {
-        members.push(format_member(source, &child));
+        members.push(format_member(source, &child, label_kinds));
     }
     members
 }
 
-fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<OutlineEntry> {
+fn extract_outline(source: &str, language: Language, query_src: &str, config: &LangConfig) -> Vec<OutlineEntry> {
+    let label_kinds: HashSet<&str> = config.label_kinds.iter().map(|s| s.as_str()).collect();
+
     let mut parser = Parser::new();
     parser.set_language(&language).expect("Failed to set language");
 
@@ -119,7 +129,7 @@ fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<Out
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
-    let mut match_map: std::collections::BTreeMap<usize, MatchData> = std::collections::BTreeMap::new();
+    let mut match_map: BTreeMap<usize, MatchData> = BTreeMap::new();
 
     while let Some(m) = matches.next() {
         let mut sig_node: Option<Node> = None;
@@ -159,7 +169,7 @@ fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<Out
             };
 
             let (members, body_range) = if let Some(body) = body_node {
-                (collect_body_members(source, &body),
+                (collect_body_members(source, &body, &label_kinds),
                  Some((body.start_byte(), body.end_byte())))
             } else {
                 (vec![], None)
@@ -185,8 +195,7 @@ fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<Out
             continue;
         }
         if !data.members.is_empty() {
-            let uses_braces = !data.sig_text.ends_with(':');
-            let header = if uses_braces {
+            let header = if config.uses_braces {
                 format!("{} {{", data.sig_text)
             } else {
                 data.sig_text.clone()
@@ -208,7 +217,7 @@ fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<Out
                     end_line: member.end_line,
                 });
             }
-            if uses_braces {
+            if config.uses_braces {
                 entries.push(OutlineEntry {
                     signature: "}".to_string(),
                     start_line: 0,

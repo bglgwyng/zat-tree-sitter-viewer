@@ -10,6 +10,10 @@
   name: (_)
   body: (field_declaration_list) @body) @signature
 
+; Access specifiers inside class/struct bodies
+(field_declaration_list
+  (access_specifier) @label)
+
 ; Struct with fields
 (struct_specifier
   name: (_)
