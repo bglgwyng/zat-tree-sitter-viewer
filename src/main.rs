@@ -11,6 +11,7 @@ fn main() {
     let (language, query_src) = match lang_arg.as_str() {
         "go" => (tree_sitter_go::LANGUAGE.into(), include_str!("../queries/go.scm")),
         "c" => (tree_sitter_c::LANGUAGE.into(), include_str!("../queries/c.scm")),
+        "cpp" | "cc" | "cxx" => (tree_sitter_cpp::LANGUAGE.into(), include_str!("../queries/cpp.scm")),
         "java" => (tree_sitter_java::LANGUAGE.into(), include_str!("../queries/java.scm")),
         other => {
             eprintln!("Unsupported language: {}", other);
@@ -40,6 +41,7 @@ struct MatchData {
     sig_text: String,
     line: usize,
     body_members: Vec<String>,
+    body_range: Option<(usize, usize)>,
 }
 
 fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<OutlineEntry> {
@@ -103,22 +105,34 @@ fn extract_outline(source: &str, language: Language, query_src: &str) -> Vec<Out
                 }
             };
 
-            let body_members = if let Some(body) = body_node {
-                collect_body_members(source, &body)
+            let (body_members, body_range) = if let Some(body) = body_node {
+                (collect_body_members(source, &body),
+                 Some((body.start_byte(), body.end_byte())))
             } else {
-                vec![]
+                (vec![], None)
             };
 
             match_map.insert(start, MatchData {
                 sig_text,
                 line: node.start_position().row + 1,
                 body_members,
+                body_range,
             });
         }
     }
 
+    // Collect body ranges to filter out nested matches
+    let body_ranges: Vec<(usize, usize)> = match_map.values()
+        .filter_map(|d| d.body_range)
+        .collect();
+
     let mut entries = Vec::new();
-    for data in match_map.values() {
+    for (start, data) in match_map.iter() {
+        // Skip if this signature is inside another entry's body
+        if body_ranges.iter().any(|(bs, be)| *start > *bs && *start < *be) {
+            continue;
+        }
+        let data = data;
         if !data.body_members.is_empty() {
             entries.push(OutlineEntry {
                 signature: format!("{} {{", data.sig_text),
@@ -149,6 +163,10 @@ fn collect_body_members(source: &str, body_node: &Node) -> Vec<String> {
     let mut members = Vec::new();
     let mut cursor = body_node.walk();
     for child in body_node.named_children(&mut cursor) {
+        // Skip access specifiers (public:, private:, protected:)
+        if child.kind() == "access_specifier" {
+            continue;
+        }
         let text = &source[child.byte_range()];
         let first_line = text.lines().next().unwrap_or(text).trim();
         let sig = if let Some(pos) = first_line.find('{') {
